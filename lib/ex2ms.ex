@@ -1,270 +1,188 @@
 defmodule Ex2ms do
   @moduledoc """
-  This module provides the `Ex2ms.fun/2` macro for translating Elixir functions
+  This module provides the `Ex2ms.fun/1` macro for translating Elixir functions
   to match specifications.
   """
 
-  @bool_functions [
-    :is_atom,
-    :is_float,
-    :is_integer,
-    :is_list,
-    :is_number,
-    :is_pid,
-    :is_port,
-    :is_reference,
-    :is_tuple,
-    :is_binary,
-    :is_function,
-    :is_record,
-    :and,
-    :or,
-    :not,
-    :xor
-  ]
-
-  @extra_guard_functions [
-    :abs,
-    :element,
-    :hd,
-    :count,
-    :node,
-    :round,
-    :size,
-    :tl,
-    :trunc,
-    :+,
-    :-,
-    :*,
-    :/,
-    :div,
-    :rem,
-    :band,
-    :bor,
-    :bxor,
-    :bnot,
-    :bsl,
-    :bsr,
-    :>,
-    :>=,
-    :<,
-    :<=,
-    :===,
-    :==,
-    :!==,
-    :!=,
-    :self
-  ]
-
-  @guard_functions @bool_functions ++ @extra_guard_functions
-
-  @elixir_erlang [===: :"=:=", !==: :"=/=", !=: :"/=", <=: :"=<", and: :andalso, or: :orelse]
-
-  Enum.each(@guard_functions, fn atom ->
-    defp is_guard_function(unquote(atom)), do: true
-  end)
-
-  defp is_guard_function(_), do: false
-
-  Enum.each(@elixir_erlang, fn {elixir, erlang} ->
-    defp map_elixir_erlang(unquote(elixir)), do: unquote(erlang)
-  end)
-
-  defp map_elixir_erlang(atom), do: atom
-
-  @doc """
-  Translates an anonymous function to a match specification.
-
-  ## Examples
-      iex> Ex2ms.fun do {x, y} -> x == 2 end
-      [{{:"$1", :"$2"}, [], [{:==, :"$1", 2}]}]
-  """
-  defmacro fun(do: clauses) do
-    clauses
-    |> Enum.map(fn {:->, _, clause} -> translate_clause(clause, __CALLER__) end)
-    |> Macro.escape(unquote: true)
-  end
-
-  defmacrop is_literal(term) do
+  defmacro fun(data) do
     quote do
-      is_atom(unquote(term)) or is_number(unquote(term)) or is_binary(unquote(term))
+      Ex2ms.ets_spec(unquote(data))
     end
   end
 
-  defp translate_clause([head, body], caller) do
-    {head, conds, state} = translate_head(head, caller)
-
-    case head do
-      %{} ->
-        raise_parameter_error(head)
-
-      _ ->
-        body = translate_body(body, state)
-        {head, conds, body}
-    end
-  end
-
-  defp translate_body({:__block__, _, exprs}, state) when is_list(exprs) do
-    Enum.map(exprs, &translate_cond(&1, state))
-  end
-
-  defp translate_body(expr, state) do
-    [translate_cond(expr, state)]
-  end
-
-  defp translate_cond({var, _, nil}, state) when is_atom(var) do
-    if match_var = state.vars[var] do
-      :"#{match_var}"
-    else
-      raise ArgumentError, message: "variable `#{var}` is unbound in matchspec"
-    end
-  end
-
-  defp translate_cond({left, right}, state), do: translate_cond({:{}, [], [left, right]}, state)
-
-  defp translate_cond({:{}, _, list}, state) when is_list(list) do
-    {list |> Enum.map(&translate_cond(&1, state)) |> List.to_tuple()}
-  end
-
-  defp translate_cond({:^, _, [var]}, _state) do
-    {:unquote, [], [var]}
-  end
-
-  defp translate_cond(fun_call = {fun, _, args}, state) when is_atom(fun) and is_list(args) do
-    cond do
-      is_guard_function(fun) ->
-        match_args = Enum.map(args, &translate_cond(&1, state))
-        match_fun = map_elixir_erlang(fun)
-        [match_fun | match_args] |> List.to_tuple()
-
-      expansion = is_expandable(fun_call, state.caller) ->
-        translate_cond(expansion, state)
-
-      true ->
-        raise_expression_error(fun_call)
-    end
-  end
-
-  defp translate_cond(list, state) when is_list(list) do
-    Enum.map(list, &translate_cond(&1, state))
-  end
-
-  defp translate_cond(literal, _state) when is_literal(literal) do
-    literal
-  end
-
-  defp translate_cond(expr, _state), do: raise_expression_error(expr)
-
-  defp translate_head([{:when, _, [param, cond]}], caller) do
-    {head, state} = translate_param(param, caller)
-    cond = translate_cond(cond, state)
-    {head, [cond], state}
-  end
-
-  defp translate_head([param], caller) do
-    {head, state} = translate_param(param, caller)
-    {head, [], state}
-  end
-
-  defp translate_head(expr, _caller), do: raise_parameter_error(expr)
-
-  defp translate_param(param, caller) do
-    param = Macro.expand(param, %{caller | context: :match})
-
-    {param, state} =
-      case param do
-        {:=, _, [{var, _, nil}, param]} when is_atom(var) ->
-          state = %{vars: [{var, "$_"}], count: 0, outer_vars: caller.vars, caller: caller}
-          {Macro.expand(param, %{caller | context: :match}), state}
-
-        {:=, _, [param, {var, _, nil}]} when is_atom(var) ->
-          state = %{vars: [{var, "$_"}], count: 0, outer_vars: caller.vars, caller: caller}
-          {Macro.expand(param, %{caller | context: :match}), state}
-
-        {var, _, nil} when is_atom(var) ->
-          {param, %{vars: [], count: 0, outer_vars: caller.vars, caller: caller}}
-
-        {:{}, _, list} when is_list(list) ->
-          {param, %{vars: [], count: 0, outer_vars: caller.vars, caller: caller}}
-
-        {:%{}, _, list} when is_list(list) ->
-          {param, %{vars: [], count: 0, outer_vars: caller.vars, caller: caller}}
-
-        {_, _} ->
-          {param, %{vars: [], count: 0, outer_vars: caller.vars, caller: caller}}
-
-        _ ->
-          raise_parameter_error(param)
+  defmacro ets_spec(do: clauses) do
+    env =
+      quote do
+        import Kernel, only: []
+        import Ex2ms.Guard
+        __ENV__
       end
+    {env, _} = Code.eval_quoted(env, [], __CALLER__)
 
-    do_translate_param(param, state)
+    ast_to_spec(clauses, env)
   end
 
-  defp do_translate_param({:_, _, nil}, state) do
+  defmacro trace_spec(do: clauses) do
+    env =
+      quote do
+        import Kernel, only: []
+        import Ex2ms.Guard
+        import Ex2ms.Trace
+        __ENV__
+      end
+    {env, _} = Code.eval_quoted(env, [], __CALLER__)
+
+    ast_to_spec(clauses, env)
+  end
+
+  defmacro free_spec(do: clauses) do
+    env =
+      quote do
+        import Kernel, only: []
+        import Ex2ms.Guard
+        __ENV__
+      end
+    {env, _} = Code.eval_quoted(env, [], __CALLER__)
+
+    ast_to_spec(clauses, env)
+  end
+
+  defp ast_to_spec(clauses, env) when is_list(clauses) do
+    Enum.map(clauses, &clause_to_ms(&1, env))
+  end
+
+  defp clause_to_ms({:->, _, [[arg], body]}, env) do
+    {head, guards} = collect_guards(arg, [])
+    {head, state} = expand_head(Macro.expand(head, env), env)
+    guards = Enum.map(guards, &expand_guard(&1, state, env))
+    body = expand_body(body, state, env)
+    {:{}, [], [head, guards, body]}
+  end
+
+  defp collect_guards({:when, _, [param, guard]}, acc) do
+    collect_guards(param, [guard | acc])
+  end
+
+  defp collect_guards(other, acc) do
+    {other, Enum.reverse(acc)}
+  end
+
+  defguard is_var(name, ctx) when is_atom(name) and is_atom(ctx)
+
+  defguard is_literal(value) when is_atom(value) or is_binary(value) or is_number(value)
+
+  defp expand_head({:=, _, [{name, _, ctx} = var, value]}, env) when is_var(name, ctx) do
+    expand_head(Macro.expand(value, env), %{var_id(var) => :"$_"}, env)
+  end
+
+  defp expand_head({:=, _, [value, {name, _, ctx} = var]}, env) when is_var(name, ctx) do
+    expand_head(Macro.expand(value, env), %{var_id(var) => :"$_"}, env)
+  end
+
+  defp expand_head({name, _, ctx} = var, _env) when is_var(name, ctx) do
+    {:_, %{var_id(var) => :"$_"}}
+  end
+
+  defp expand_head(other, env) do
+    expand_head(other, %{}, env)
+  end
+
+  defp expand_head({:_, _, ctx}, state, _env) when is_atom(ctx) do
     {:_, state}
   end
 
-  defp do_translate_param({var, _, nil}, state) when is_atom(var) do
-    if match_var = state.vars[var] do
-      {:"#{match_var}", state}
-    else
-      match_var = "$#{state.count + 1}"
+  defp expand_head({name, _, ctx} = var, state, _env) when is_var(name, ctx) do
+    case Map.fetch(state, var_id(var)) do
+      {:ok, name} ->
+        {name, state}
 
-      state =
-        state
-        |> Map.update!(:vars, &[{var, match_var} | &1])
-        |> Map.update!(:count, &(&1 + 1))
-
-      {:"#{match_var}", state}
+      :error ->
+        name = :"$#{map_size(state) + 1}"
+        {name, Map.put(state, var_id(var), name)}
     end
   end
 
-  defp do_translate_param({left, right}, state) do
-    do_translate_param({:{}, [], [left, right]}, state)
+  defp expand_head({:{}, _, list}, state, env) when is_list(list) do
+    {list, state} = Enum.map_reduce(list, state, &expand_head(Macro.expand(&1, env), &2, env))
+    {{:{}, [], list}, state}
   end
 
-  defp do_translate_param({:{}, _, list}, state) when is_list(list) do
-    {list, state} = Enum.map_reduce(list, state, &do_translate_param(&1, &2))
-    {List.to_tuple(list), state}
+  defp expand_head({:^, _, [value]}, state, _env) do
+    {value, state}
   end
 
-  defp do_translate_param({:^, _, [var]}, state) do
-    {{:unquote, [], [var]}, state}
+  defp expand_head({:%{}, _, kvs}, state, env) do
+    {kvs, state} =
+      Enum.map_reduce(kvs, state, fn {key, value}, state ->
+        {key, state} = expand_head(Macro.expand(key, env), state, env)
+        {value, state} = expand_head(Macro.expand(value, env), state, env)
+        {{key, value}, state}
+      end)
+
+    {{:%{}, [], kvs}, state}
   end
 
-  defp do_translate_param(list, state) when is_list(list) do
-    Enum.map_reduce(list, state, &do_translate_param(&1, &2))
+  defp expand_head({left, right}, state, env) do
+    expand_head({:{}, [], [left, right]}, state, env)
   end
 
-  defp do_translate_param(literal, state) when is_literal(literal) do
-    {literal, state}
+  defp expand_head(list, state, env) when is_list(list) do
+    Enum.map_reduce(list, state, &expand_head(Macro.expand(&1, env), &2, env))
   end
 
-  defp do_translate_param({:%{}, _, list}, state) do
-    Enum.reduce(list, {%{}, state}, fn {key, value}, {map, state} ->
-      {key, key_state} = do_translate_param(key, state)
-      {value, value_state} = do_translate_param(value, key_state)
-      {Map.put(map, key, value), value_state}
-    end)
+  defp expand_head(value, state, _env) when is_literal(value) do
+    {value, state}
   end
 
-  defp do_translate_param(expr, _state), do: raise_parameter_error(expr)
-
-  defp is_expandable(ast, env) do
-    expansion = Macro.expand_once(ast, env)
-    if ast !== expansion, do: expansion, else: false
+  defp expand_guard({name, _, ctx} = var, state, _env) when is_var(name, ctx) do
+    # TODO: error handling
+    Map.fetch!(state, var_id(var))
   end
 
-  defp raise_expression_error(expr) do
-    message = "illegal expression in matchspec:\n#{Macro.to_string(expr)}"
-    raise ArgumentError, message: message
+  defp expand_guard({:{}, _, list}, state, env) when is_list(list) do
+    {:{}, [], [{:{}, [], Enum.map(list, &expand_guard(&1, state, env))}]}
   end
 
-  defp raise_parameter_error(expr) do
-    message =
-      "illegal parameter to matchspec (has to be a single variable or tuple):\n" <>
-        Macro.to_string(expr)
+  defp expand_guard({:%{}, _, kvs}, state, env) do
+    kvs =
+      Enum.map(kvs, fn {key, value} ->
+        {expand_guard(key, state, env), expand_guard(value, state, env)}
+      end)
 
-    raise ArgumentError, message: message
+    {:%{}, [], kvs}
   end
+
+  defp expand_guard({:^, _, [value]}, _state, _env) do
+    value
+  end
+
+  defp expand_guard({name, _, args} = fun, state, env) when is_atom(name) and is_list(args) do
+    case Macro.expand(fun, env) do
+      {:{}, _, [fun | args]} when is_atom(fun) ->
+        {:{}, [], [fun | Enum.map(args, &expand_guard(&1, state, env))]}
+      other -> raise "invalid call: #{inspect other}"
+    end
+  end
+
+  defp expand_guard({left, right}, state, env) do
+    expand_guard({:{}, [], [left, right]}, state, env)
+  end
+
+  defp expand_guard(list, state, env) when is_list(list) do
+    Enum.map(list, &expand_guard(&1, state, env))
+  end
+
+  defp expand_guard(value, _state, _env) when is_literal(value) do
+    value
+  end
+
+  defp expand_body({:__block__, _, exprs}, state, env) when is_list(exprs) do
+    Enum.map(exprs, &expand_guard(&1, state, env))
+  end
+
+  defp expand_body(ast, state, env) do
+    expand_guard(ast, state, env)
+  end
+
+  defp var_id({name, meta, ctx}), do: {name, Keyword.get(meta, :counter, ctx)}
 end

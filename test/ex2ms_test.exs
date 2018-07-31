@@ -1,5 +1,6 @@
 defmodule Ex2msTest do
   use ExUnit.Case, async: true
+  doctest Ex2ms
 
   require Record
   Record.defrecordp(:user, [:name, :age])
@@ -234,5 +235,4 @@ defmodule Ex2msTest do
     assert ms == [{{:user, :_, :"$1"}, [{:==, :"$1", nil}], [:"$_"]}]
   end
 
-  doctest Ex2ms
 end
