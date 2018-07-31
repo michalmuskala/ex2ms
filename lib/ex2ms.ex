@@ -4,6 +4,8 @@ defmodule Ex2ms do
   to match specifications.
   """
 
+  require Ex2ms.Guard
+
   defmacro fun(data) do
     quote do
       Ex2ms.ets_spec(unquote(data))
@@ -19,7 +21,7 @@ defmodule Ex2ms do
       end
     {env, _} = Code.eval_quoted(env, [], __CALLER__)
 
-    ast_to_spec(clauses, env)
+    ast_to_spec(clauses, %{env | context: :match})
   end
 
   defmacro trace_spec(do: clauses) do
@@ -32,7 +34,7 @@ defmodule Ex2ms do
       end
     {env, _} = Code.eval_quoted(env, [], __CALLER__)
 
-    ast_to_spec(clauses, env)
+    ast_to_spec(clauses, %{env | context: :match})
   end
 
   defmacro free_spec(do: clauses) do
@@ -44,7 +46,7 @@ defmodule Ex2ms do
       end
     {env, _} = Code.eval_quoted(env, [], __CALLER__)
 
-    ast_to_spec(clauses, env)
+    ast_to_spec(clauses, %{env | context: :match})
   end
 
   defp ast_to_spec(clauses, env) when is_list(clauses) do
@@ -80,11 +82,11 @@ defmodule Ex2ms do
   end
 
   defp expand_head({name, _, ctx} = var, _env) when is_var(name, ctx) do
-    {:_, %{var_id(var) => :"$_"}}
+    {:"$1", %{var_id(var) => :"$1"}}
   end
 
   defp expand_head(other, env) do
-    expand_head(other, %{}, env)
+    expand_head(other, %{:dummy => :"$_"}, env)
   end
 
   defp expand_head({:_, _, ctx}, state, _env) when is_atom(ctx) do
@@ -97,7 +99,7 @@ defmodule Ex2ms do
         {name, state}
 
       :error ->
-        name = :"$#{map_size(state) + 1}"
+        name = :"$#{map_size(state)}"
         {name, Map.put(state, var_id(var), name)}
     end
   end
@@ -153,14 +155,25 @@ defmodule Ex2ms do
   end
 
   defp expand_guard({:^, _, [value]}, _state, _env) do
-    value
+    {:const, value}
   end
 
-  defp expand_guard({name, _, args} = fun, state, env) when is_atom(name) and is_list(args) do
-    case Macro.expand(fun, env) do
+  defp expand_guard({name, meta, args} = fun, state, env) when is_atom(name) and is_list(args) do
+    case Macro.expand_once({name, prune_hygiene(meta, name, length(args)), args}, env) do
       {:{}, _, [fun | args]} when is_atom(fun) ->
         {:{}, [], [fun | Enum.map(args, &expand_guard(&1, state, env))]}
-      other -> raise "invalid call: #{inspect other}"
+      ^fun ->
+        raise "invalid call: #{inspect fun}"
+      other ->
+        expand_guard(other, state, env)
+    end
+  end
+
+  defp expand_guard({{:., _, [_, name]}, _, args} = call, state, env) when is_atom(name) and is_list(args) do
+    IO.inspect call
+    case Macro.expand_once(call, env) do
+      ^call -> raise "invalid call: #{inspect call}"
+      other -> expand_guard(other, state, env)
     end
   end
 
@@ -181,7 +194,19 @@ defmodule Ex2ms do
   end
 
   defp expand_body(ast, state, env) do
-    expand_guard(ast, state, env)
+    [expand_guard(ast, state, env)]
+  end
+
+  defp prune_hygiene(meta, name, arity) do
+    case Keyword.fetch(meta, :import) do
+      {:ok, Kernel} ->
+        if macro_exported?(Ex2ms.Guard, name, arity) do
+          Keyword.put(meta, :import, Ex2ms.Guard)
+        else
+          meta
+        end
+      _ -> meta
+    end
   end
 
   defp var_id({name, meta, ctx}), do: {name, Keyword.get(meta, :counter, ctx)}
